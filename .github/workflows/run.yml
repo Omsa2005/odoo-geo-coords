@@ -1,9 +1,8 @@
 name: Odoo Update Geo
 
 on:
-  schedule:
-    - cron: '0 12 * * *'  # Tous les jours à midi UTC
-  workflow_dispatch:      # Pour pouvoir le lancer manuellement
+  workflow_dispatch:        # Exécution manuelle possible
+  repository_dispatch:      # Exécution déclenchée par un webhook externe (Odoo)
 
 jobs:
   run-script:
