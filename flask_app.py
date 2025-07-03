@@ -4,8 +4,13 @@ import uuid
 import math
 import threading
 import random
+import logging
+import traceback
 
 app = Flask(__name__)
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 
 # 🔑 Connexion Odoo
 ODOO_URL = 'https://agence-vo.odoo.com'
@@ -13,14 +18,17 @@ ODOO_DB = 'agence-vo'
 ODOO_USER = 'salhiomar147@gmail.com'
 ODOO_PASSWORD = 'Omarsalhi2005'
 
-common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
-models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
-uid = common.authenticate(ODOO_DB, ODOO_USER, ODOO_PASSWORD, {})
-
-if uid:
-    print("✅ Connecté à Odoo avec UID :", uid)
-else:
-    raise Exception("❌ Échec de connexion à Odoo")
+try:
+    common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
+    models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
+    uid = common.authenticate(ODOO_DB, ODOO_USER, ODOO_PASSWORD, {})
+    if uid:
+        logging.info(f"✅ Connecté à Odoo avec UID : {uid}")
+    else:
+        raise Exception("❌ Échec de connexion à Odoo")
+except Exception as e:
+    logging.error("Erreur connexion Odoo", exc_info=True)
+    raise e
 
 # 📦 Trajets et timers
 trajectoires = {}
@@ -59,15 +67,18 @@ def finalize_trajet(trajet_key):
     with LOCK:
         points = trajectoires.get(trajet_key)
         if not points or len(points) < 2:
-            print(f"⏳ Trajet {trajet_key} annulé (pas assez de points)")
+            logging.info(f"⏳ Trajet {trajet_key} annulé (pas assez de points)")
+            trajectoires.pop(trajet_key, None)
+            if trajet_key in timers:
+                timers.pop(trajet_key).cancel()
             return
 
-        print(f"🚀 Optimisation du trajet {trajet_key} ({len(points)} points)")
+        logging.info(f"🚀 Optimisation du trajet {trajet_key} ({len(points)} points)")
 
         try:
             # 📌 Optimiser ordre
             optimized_points = optimize_order(points)
-            print(f"🔄 Ordre optimisé : {[p['name'] for p in optimized_points]}")
+            logging.info(f"🔄 Ordre optimisé : {[p['name'] for p in optimized_points]}")
 
             # 📏 Distance totale
             total_distance = 0
@@ -99,18 +110,17 @@ def finalize_trajet(trajet_key):
                 'x_studio_nom_du_trajet': " -> ".join(p['name'] for p in optimized_points),
                 'x_studio_coordonnes_gps': google_maps_link
             }
-            print("✅ Données envoyées à Odoo :", result_data)
+            logging.info(f"✅ Données envoyées à Odoo : {result_data}")
 
             # ✅ Enregistrement Odoo
             record_id = models.execute_kw(
                 ODOO_DB, uid, ODOO_PASSWORD,
                 'x_trajets_optimises', 'create', [result_data]
             )
-            print(f"✅ Trajet {trajet_key} enregistré dans Odoo (ID {record_id})")
+            logging.info(f"✅ Trajet {trajet_key} enregistré dans Odoo (ID {record_id})")
 
         except Exception as e:
-            print(f"❌ Erreur finalisation trajet {trajet_key} :", e)
-            traceback.print_exc()
+            logging.error(f"❌ Erreur finalisation trajet {trajet_key} :", exc_info=True)
         finally:
             trajectoires.pop(trajet_key, None)
             if trajet_key in timers:
@@ -120,7 +130,7 @@ def finalize_trajet(trajet_key):
 def optimize_route():
     try:
         data = request.json
-        print("🔥 Données reçues :", data)
+        logging.info(f"🔥 Données reçues : {data}")
 
         trajet_key = data.get('_action') or str(uuid.uuid4())
         with LOCK:
@@ -132,7 +142,7 @@ def optimize_route():
             name = data.get('x_studio_nom_de_point', f'Point {len(trajectoires[trajet_key]) + 1}')
 
             trajectoires[trajet_key].append({'lat': lat, 'lon': lon, 'name': name})
-            print(f"📦 Point ajouté trajet {trajet_key} : {name} ({lat},{lon})")
+            logging.info(f"📦 Point ajouté trajet {trajet_key} : {name} ({lat},{lon})")
 
             # ⏲️ Reset Timer (2 secondes)
             if trajet_key in timers:
@@ -144,9 +154,10 @@ def optimize_route():
         return jsonify({'status': 'pending', 'message': f"Point ajouté au trajet {trajet_key}. Finalisation auto dans 2s sans nouvel ajout."})
 
     except Exception as e:
-        print("❌ Erreur serveur :", str(e))
-        traceback.print_exc()
+        logging.error("❌ Erreur serveur :", exc_info=True)
         return jsonify({'error': 'Erreur serveur Flask', 'details': str(e)}), 500
 
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0'
+# NE PAS METTRE app.run() ici si tu utilises gunicorn !
+
+# if __name__ == '__main__':
+#     app.run(debug=True, host='0.0.0.0')
