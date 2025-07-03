@@ -13,39 +13,32 @@ ODOO_DB = 'agence-vo'
 ODOO_USER = 'salhiomar147@gmail.com'
 ODOO_PASSWORD = 'Omarsalhi2005'
 
-# Connexion aux endpoints XML-RPC
 common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
 models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
-
-# Authentification
 uid = common.authenticate(ODOO_DB, ODOO_USER, ODOO_PASSWORD, {})
+
 if uid:
     print("✅ Connecté à Odoo avec UID :", uid)
 else:
     print("❌ Échec de connexion à Odoo")
 
-# 🌍 Dictionnaire pour stocker temporairement les points
 trajectoires = {}
 
 def is_in_tunisia(lat, lon):
-    """Vérifie si une coordonnée est en Tunisie"""
     return 30.228 <= lat <= 37.535 and 7.521 <= lon <= 11.600
 
 def get_osrm_table(points):
-    """Récupère la matrice de distance/durée entre tous les points"""
     coords = ";".join(f"{p['lon']},{p['lat']}" for p in points)
     url = f"http://router.project-osrm.org/table/v1/driving/{coords}"
-    response = requests.get(url)
-    response.raise_for_status()
-    return response.json()
+    r = requests.get(url)
+    r.raise_for_status()
+    return r.json()
 
 def tsp_nearest_neighbor(distances):
-    """Algorithme Nearest Neighbor pour TSP"""
     n = len(distances)
     visited = [False] * n
     path = [0]
     visited[0] = True
-
     for _ in range(n - 1):
         last = path[-1]
         next_city = min(
@@ -56,8 +49,15 @@ def tsp_nearest_neighbor(distances):
         visited[next_city] = True
     return path
 
+def format_duration(minutes):
+    hours = int(minutes // 60)
+    mins = int(minutes % 60)
+    if hours > 0:
+        return f"{hours}h{mins}min"
+    else:
+        return f"{mins}min"
+
 def generate_google_maps_link(points_ordered):
-    """Construit le lien Google Maps"""
     base_url = "https://www.google.com/maps/dir/"
     waypoints = "/".join(f"{p['lat']},{p['lon']}" for p in points_ordered)
     return base_url + waypoints
@@ -75,47 +75,47 @@ def optimize_route():
         if trajet_key not in trajectoires:
             trajectoires[trajet_key] = []
 
-        # Extraire coordonnée
+        # Ajouter le point
         lat = float(data['x_studio_latitude'])
         lon = float(data['x_studio_longitude'])
         name = data.get('x_studio_nom_de_point', f'Point {len(trajectoires[trajet_key]) + 1}')
         print(f"🛰️ Point reçu : {name} -> Lat: {lat}, Lon: {lon}")
 
         if not is_in_tunisia(lat, lon):
-            error_msg = f"❌ Le point '{name}' est hors des limites de la Tunisie"
-            print(error_msg)
-            return jsonify({'error': error_msg}), 400
+            return jsonify({'error': f"Point '{name}' hors Tunisie"}), 400
 
         trajectoires[trajet_key].append({'lat': lat, 'lon': lon, 'name': name})
-        print(f"📦 Points pour le trajet [{trajet_key}] :", trajectoires[trajet_key])
+        print(f"📦 Points collectés [{trajet_key}] :", trajectoires[trajet_key])
 
-        if len(trajectoires[trajet_key]) >= 2:
+        # Vérifier si on doit calculer (fin de trajet)
+        if data.get('x_studio_fin_trajet') is True:
             points = trajectoires[trajet_key]
 
-            # Récupérer la matrice de distances
-            table = get_osrm_table(points)
-            distances = table['durations']  # ou table['distances'] si dispo
+            if len(points) < 2:
+                return jsonify({'error': "Pas assez de points pour optimiser"}), 400
 
-            # Trouver ordre optimal
+            # Calcul matrice et ordre optimisé
+            table = get_osrm_table(points)
+            distances = table['durations']
             order = tsp_nearest_neighbor(distances)
             points_ordered = [points[i] for i in order]
 
-            # Construire le lien Google Maps
+            # Lien Google Maps
             google_maps_url = generate_google_maps_link(points_ordered)
 
-            # Appeler OSRM pour le trajet complet
+            # Appel OSRM pour trajet complet
             coords = ";".join(f"{p['lon']},{p['lat']}" for p in points_ordered)
             route_url = f"http://router.project-osrm.org/route/v1/driving/{coords}?overview=false"
-            route_response = requests.get(route_url).json()
+            route_data = requests.get(route_url).json()
 
-            total_distance = route_response['routes'][0]['distance'] / 1000  # en km
-            total_duration = route_response['routes'][0]['duration'] / 60  # en minutes
+            total_distance = route_data['routes'][0]['distance'] / 1000  # km
+            total_duration = route_data['routes'][0]['duration'] / 60  # min
 
             nom_trajet = f"Trajet Optimisé {random.randint(1, 1000)}"
             result_data = {
                 'x_name': nom_trajet,
                 'x_studio_distance_km': round(total_distance, 2),
-                'x_studio_dure': round(total_duration, 1),
+                'x_studio_dure': format_duration(total_duration),
                 'x_studio_nom_du_trajet': " -> ".join(p['name'] for p in points_ordered),
                 'x_studio_coordonnes_gps': google_maps_url
             }
