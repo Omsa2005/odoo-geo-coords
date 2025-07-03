@@ -1,32 +1,22 @@
 from flask import Flask, request, jsonify
 import requests
 import xmlrpc.client
-import traceback
 
 app = Flask(__name__)
 
-# ----- CONFIG ODOO -----
+# Config Odoo
 ODOO_URL = 'https://agence-vo.odoo.com'
 ODOO_DB = 'agence-vo'
-ODOO_USER = 'salhiomar147@gmail.com'
+ODOO_USERNAME = 'salhiomar147@gmail.com'
 ODOO_PASSWORD = 'Omarsalhi2005'
 
-# ----- CONFIG GRAPHOPPER -----
+# Config GraphHopper
 GRAPHOPPER_API_KEY = 'a917c6a2-7403-4784-85bb-bd87deaaabdb'
-GRAPHOPPER_URL = 'https://graphhopper.com/api/1/route'
 
-# Connexion Odoo XML-RPC
+# Connexion à Odoo XML-RPC (login une seule fois, hors route)
 common = xmlrpc.client.ServerProxy(f'{ODOO_URL}/xmlrpc/2/common')
-uid = common.authenticate(ODOO_DB, ODOO_USER, ODOO_PASSWORD, {})
+uid = common.authenticate(ODOO_DB, ODOO_USERNAME, ODOO_PASSWORD, {})
 models = xmlrpc.client.ServerProxy(f'{ODOO_URL}/xmlrpc/2/object')
-
-if not uid:
-    raise Exception("Échec authentification Odoo")
-
-print(f"✅ Connecté à Odoo avec UID : {uid}")
-
-# Stockage temporaire des points reçus, regroupés par trajet (_id)
-trajets_points = {}
 
 @app.route('/')
 def home():
@@ -36,130 +26,60 @@ def home():
 def optimize_route():
     try:
         data = request.json
-        print("🔥 Charge reçue :", data)
 
-        # Récupérer l'id du trajet
-        trajet_id = str(data.get('_id'))
+        points = data.get('points')
+        trajet_id = data.get('trajet_id')  # id du trajet Odoo à mettre à jour
+
+        if not points or len(points) < 2:
+            return jsonify({'error': 'Au moins 2 points requis'}), 400
         if not trajet_id:
-            return jsonify({'error': 'Identifiant trajet (_id) manquant'}), 400
+            return jsonify({'error': 'trajet_id manquant'}), 400
 
-        # Extraire les données du point
-        try:
-            lat = float(data['x_studio_latitude'])
-            lon = float(data['x_studio_longitude'])
-            name = data.get('x_studio_nom_de_point', 'Point sans nom')
-        except Exception as e:
-            return jsonify({'error': f'Données coordonnées invalides : {str(e)}'}), 400
+        # Préparer la liste des coordonnées [lon, lat]
+        coords = [[float(p['x_studio_longitude']), float(p['x_studio_latitude'])] for p in points]
 
-        # Ajouter ce point à la liste pour ce trajet
-        if trajet_id not in trajets_points:
-            trajets_points[trajet_id] = []
-        trajets_points[trajet_id].append({'lat': lat, 'lon': lon, 'name': name})
-
-        print(f"📦 Points pour trajet {trajet_id} : {trajets_points[trajet_id]}")
-
-        # Si on a moins de 2 points, on ne peut pas optimiser (route impossible)
-        if len(trajets_points[trajet_id]) < 2:
-            return jsonify({'message': 'En attente de plus de points pour optimiser le trajet', 'points_actuels': len(trajets_points[trajet_id])}), 200
-
-        # Construire la liste coordonnée pour GraphHopper : [[lon, lat], ...]
-        coords = [[p['lon'], p['lat']] for p in trajets_points[trajet_id]]
-
-        # Préparer la requête vers GraphHopper
+        # Appel unique à GraphHopper
+        url = 'https://graphhopper.com/api/1/route'
         params = {
-            'point': [f"{p['lat']},{p['lon']}" for p in trajets_points[trajet_id]],  # Format lat,lon
-            'type': 'json',
-            'locale': 'fr',
+            'point': [f"{lat},{lon}" for lon, lat in coords],  # attention ordre lat,lon dans l'URL API
             'vehicle': 'car',
-            'points_encoded': 'false',
+            'locale': 'fr',
             'key': GRAPHOPPER_API_KEY,
-            'optimize': 'true'  # Permet tentative d'optimisation
+            'points_encoded': 'false'
         }
+        # GraphHopper API veut plusieurs 'point' paramètres, on doit envoyer la liste de points correctement
+        # Donc on fait une requête GET avec multiples 'point' paramètres
+        r = requests.get(url, params=[('point', f"{p[1]},{p[0]}") for p in coords] + [('vehicle','car'), ('locale','fr'), ('key',GRAPHOPPER_API_KEY), ('points_encoded','false')])
+        if r.status_code != 200:
+            return jsonify({'error': 'Erreur GraphHopper', 'details': r.text}), 500
 
-        # GraphHopper API exige plusieurs points, on envoie tout en params 'point' multiples
-        # Le param 'point' doit être répétée par point (ex: point=lat,lon&point=lat,lon&...)
-        # Donc on construit la requête manuellement :
+        result = r.json()
 
-        # Construire URL params manuellement car 'point' se répète :
-        url_params = '&'.join([f"point={p['lat']},{p['lon']}" for p in trajets_points[trajet_id]])
-        url = f"{GRAPHOPPER_URL}?{url_params}&type=json&locale=fr&vehicle=car&points_encoded=false&key={GRAPHOPPER_API_KEY}&optimize=true"
+        # Extraction distance et durée
+        path = result['paths'][0]
+        distance_km = path['distance'] / 1000
+        duration_min = path['time'] / 60000
 
-        print("🌐 Appel GraphHopper URL:", url)
-        response = requests.get(url)
-        print("📡 GraphHopper Response status :", response.status_code)
-        print("📡 GraphHopper Response body :", response.text)
+        # Préparation nom du trajet
+        nom_trajet = " -> ".join(p.get('x_studio_nom_de_point', '') for p in points)
 
-        if response.status_code != 200:
-            return jsonify({'error': 'Erreur GraphHopper', 'details': response.text}), 500
-
-        res_json = response.json()
-
-        # Extraire distance et durée du trajet optimisé
-        try:
-            path = res_json['paths'][0]
-            distance_m = path.get('distance', 0)
-            duration_ms = path.get('time', 0)
-            coordinates = path['points']['coordinates']  # Liste [ [lon, lat], ...]
-        except Exception as e:
-            return jsonify({'error': 'Données de réponse GraphHopper invalides', 'details': str(e), 'response': res_json}), 500
-
-        distance_km = round(distance_m / 1000, 2)
-        duration_min = round(duration_ms / 60000, 1)
-
-        # Préparer le nom du trajet (ex: Trajet 1, 2, ...)
-        trajet_name = f"Trajet {trajet_id}"
-
-        # Enregistrer ou mettre à jour dans Odoo
-        # On cherche si le trajet existe déjà par un champ unique (ex: x_name = trajet_name)
-        existing_ids = models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            'x_trajets_optimises', 'search',
-            [[['x_name', '=', trajet_name]]]
-        )
-
+        # Mise à jour Odoo (trajet optimisé)
         vals = {
-            'x_name': trajet_name,
-            'x_studio_distance_km': distance_km,
-            'x_studio_dure': duration_min,
-            'x_studio_coordonnes_gps': str(coordinates),  # Stocké en string, adapte selon type champ
+            'x_name': f"Trajet Optimisé : {nom_trajet}",
+            'x_studio_distance_km': round(distance_km, 2),
+            'x_studio_dure': round(duration_min, 1),
+            'x_studio_coordonnes_gps': str(coords)
         }
+        models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+                          'x_trajets_optimises', 'write', [[trajet_id], vals])
 
-        if existing_ids:
-            # Mise à jour
-            models.execute_kw(
-                ODOO_DB, uid, ODOO_PASSWORD,
-                'x_trajets_optimises', 'write',
-                [existing_ids, vals]
-            )
-            print(f"✏️ Trajet {trajet_name} mis à jour dans Odoo (ID {existing_ids})")
-        else:
-            # Création
-            new_id = models.execute_kw(
-                ODOO_DB, uid, ODOO_PASSWORD,
-                'x_trajets_optimises', 'create',
-                [vals]
-            )
-            print(f"✅ Trajet {trajet_name} créé dans Odoo avec ID {new_id}")
-
-        # Nettoyer points après optimisation (optionnel)
-        trajets_points[trajet_id] = []
-
-        # Répondre à Odoo avec le résumé
-        result = {
-            'x_studio_distance_km': distance_km,
-            'x_studio_dure': duration_min,
-            'x_studio_nom_du_trajet': trajet_name,
-            'x_studio_coordonnes_gps': coordinates,
-        }
-
-        print("✅ Résultat envoyé à Odoo :", result)
-        return jsonify(result)
+        return jsonify({'message': 'Trajet optimisé mis à jour', 'data': vals})
 
     except Exception as e:
-        print("❌ Erreur serveur :", str(e))
+        import traceback
         traceback.print_exc()
-        return jsonify({'error': 'Erreur serveur Flask', 'details': str(e)}), 500
+        return jsonify({'error': str(e)}), 500
 
 
 if __name__ == '__main__':
-    app.run(debug=True, port=10000)
+    app.run(debug=True)
