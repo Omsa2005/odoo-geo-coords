@@ -4,6 +4,7 @@ import traceback
 import random
 import xmlrpc.client
 import uuid
+import math
 
 app = Flask(__name__)
 
@@ -87,13 +88,9 @@ def optimize_route():
         trajectoires[trajet_key].append({'lat': lat, 'lon': lon, 'name': name})
         print(f"📦 Points collectés [{trajet_key}] :", trajectoires[trajet_key])
 
-        # Vérifier si on doit calculer (fin de trajet)
-        if data.get('x_studio_fin_trajet') is True:
-            points = trajectoires[trajet_key]
+        points = trajectoires[trajet_key]
 
-            if len(points) < 2:
-                return jsonify({'error': "Pas assez de points pour optimiser"}), 400
-
+        if len(points) >= 2:
             # Calcul matrice et ordre optimisé
             table = get_osrm_table(points)
             distances = table['durations']
@@ -111,10 +108,13 @@ def optimize_route():
             total_distance = route_data['routes'][0]['distance'] / 1000  # km
             total_duration = route_data['routes'][0]['duration'] / 60  # min
 
+            # 🔥 Distance arrondie au supérieur
+            total_distance_rounded = math.ceil(total_distance)
+
             nom_trajet = f"Trajet Optimisé {random.randint(1, 1000)}"
             result_data = {
                 'x_name': nom_trajet,
-                'x_studio_distance_km': round(total_distance, 2),
+                'x_studio_distance_km': total_distance_rounded,
                 'x_studio_dure': format_duration(total_duration),
                 'x_studio_nom_du_trajet': " -> ".join(p['name'] for p in points_ordered),
                 'x_studio_coordonnes_gps': google_maps_url
@@ -130,6 +130,7 @@ def optimize_route():
             )
             print("✅ Enregistrement créé dans Odoo avec ID :", record_id)
 
+            # Réinitialiser les points pour ce trajet
             del trajectoires[trajet_key]
 
             return jsonify({'status': 'success', 'odoo_record_id': record_id, **result_data})
