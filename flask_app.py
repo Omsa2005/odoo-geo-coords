@@ -30,6 +30,19 @@ else:
 # 🌍 Dictionnaire pour stocker temporairement les points par trajet
 trajectoires = {}
 
+# 📍 Définir les limites géographiques de la Tunisie
+TUNISIA_BOUNDS = {
+    'min_lat': 30.228,
+    'max_lat': 37.535,
+    'min_lon': 7.521,
+    'max_lon': 11.600
+}
+
+def is_in_tunisia(lat, lon):
+    """Vérifie si une coordonnée est en Tunisie"""
+    return (TUNISIA_BOUNDS['min_lat'] <= lat <= TUNISIA_BOUNDS['max_lat'] and
+            TUNISIA_BOUNDS['min_lon'] <= lon <= TUNISIA_BOUNDS['max_lon'])
+
 @app.route('/')
 def home():
     return "✅ API d'optimisation + Odoo opérationnelle !"
@@ -40,17 +53,24 @@ def optimize_route():
         data = request.json
         print("🔥 Données reçues de Odoo :", data)
 
-        # Identifiant unique du trajet (peut être _action, ou UUID sinon)
+        # Identifiant unique du trajet
         trajet_key = data.get('_action') or str(uuid.uuid4())
 
         # Initialiser la liste des points si trajet inconnu
         if trajet_key not in trajectoires:
             trajectoires[trajet_key] = []
 
-        # Ajouter le point reçu
+        # Extraire coordonnées et vérifier qu’elles sont en Tunisie
         lat = float(data['x_studio_latitude'])
         lon = float(data['x_studio_longitude'])
         name = data.get('x_studio_nom_de_point', f'Point {len(trajectoires[trajet_key]) + 1}')
+        print(f"🛰️ Vérification point : {name} -> Lat: {lat}, Lon: {lon}")
+
+        if not is_in_tunisia(lat, lon):
+            error_msg = f"❌ Le point '{name}' est hors des limites de la Tunisie"
+            print(error_msg)
+            return jsonify({'error': error_msg}), 400
+
         trajectoires[trajet_key].append({'lat': lat, 'lon': lon, 'name': name})
         print(f"📦 Points pour le trajet [{trajet_key}] :", trajectoires[trajet_key])
 
@@ -63,7 +83,10 @@ def optimize_route():
             headers = {'Authorization': ORS_API_KEY, 'Content-Type': 'application/json'}
             body = {
                 "coordinates": [[p['lon'], p['lat']] for p in points],
-                "instructions": False
+                "radiuses": [2000] * len(points),  # rayon de 2 km pour snapping
+                "instructions": False,
+                "bounding_box": [[TUNISIA_BOUNDS['min_lon'], TUNISIA_BOUNDS['min_lat']],
+                                 [TUNISIA_BOUNDS['max_lon'], TUNISIA_BOUNDS['max_lat']]]  # limiter à la Tunisie
             }
 
             response = requests.post(url, headers=headers, json=body)
@@ -113,4 +136,4 @@ def optimize_route():
         return jsonify({'error': 'Erreur serveur Flask', 'details': str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, host='0.0.0.0', port=5000)
