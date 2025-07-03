@@ -1,26 +1,19 @@
 from flask import Flask, request, jsonify
 import requests
-import xmlrpc.client
 import traceback
 
 app = Flask(__name__)
-
-ORS_API_KEY = '5b3ce3597851110001cf62480a32708b0250456c960d42e3850654b5'
-
-ODOO_URL = 'https://agence-vo.odoo.com'
-ODOO_DB = 'agence-vo'
-ODOO_USER = 'salhiomar147@gmail.com'
-ODOO_PASSWORD = 'Omarsalhi2005'
+GRAPHOPPER_API_KEY = 'a917c6a2-7403-4784-85bb-bd87deaaabdb'
 
 @app.route('/')
 def home():
-    return "✅ API d'optimisation de trajet opérationnelle !"
+    return "✅ API d'optimisation de trajet (GraphHopper) opérationnelle !"
 
 @app.route('/optimize_route', methods=['POST'])
 def optimize_route():
     try:
         data = request.json
-        print("🔥 Données reçues de Odoo :", data)  # Debug
+        print("🔥 Données reçues de Odoo :", data)
 
         coordinates = []
 
@@ -28,64 +21,50 @@ def optimize_route():
             for point in data:
                 lat = float(point['x_studio_latitude'])
                 lon = float(point['x_studio_longitude'])
-                coordinates.append([lon, lat])
+                coordinates.append(f"{lat},{lon}")
         elif isinstance(data, dict):
             lat = float(data['x_studio_latitude'])
             lon = float(data['x_studio_longitude'])
-            coordinates.append([lon, lat])
-            coordinates.append([lon, lat])  # doublon pour ORS
+            coordinates.append(f"{lat},{lon}")
+            coordinates.append(f"{lat},{lon}")  # doublon pour forcer le calcul
         else:
             return jsonify({'error': 'Format JSON invalide'}), 400
 
         if len(coordinates) < 2:
             return jsonify({'error': 'Minimum 2 points requis'}), 400
 
-        url = 'https://api.openrouteservice.org/v2/directions/driving-car/geojson'
-        headers = {'Authorization': ORS_API_KEY, 'Content-Type': 'application/json'}
-        body = {'coordinates': coordinates}
-        response = requests.post(url, json=body, headers=headers)
+        # Construire URL de la requête GraphHopper
+        url = f"https://graphhopper.com/api/1/route"
+        params = {
+            'point': coordinates,
+            'vehicle': 'car',
+            'locale': 'fr',
+            'calc_points': 'true',
+            'key': GRAPHOPPER_API_KEY,
+            'points_encoded': 'false'
+        }
+
+        response = requests.get(url, params=params)
+        print("📡 GraphHopper Response status :", response.status_code)
+        print("📡 GraphHopper Response body :", response.text)
 
         if response.status_code != 200:
-            return jsonify({'error': 'ORS API error', 'details': response.text}), 500
+            return jsonify({'error': 'GraphHopper API error', 'details': response.text}), 500
 
-        ors_result = response.json()
+        result = response.json()
+        route = result['paths'][0]
+        distance_km = route['distance'] / 1000
+        duration_min = route['time'] / 1000 / 60
 
-        try:
-            route = ors_result['features'][0]['properties']['summary']
-            distance_km = route.get('distance', 0) / 1000
-            duration_min = route.get('duration', 0) / 60
-        except (KeyError, IndexError, TypeError) as e:
-            return jsonify({'error': 'Résumé trajet manquant', 'ors_response': ors_result}), 500
-
-        # Connexion Odoo
-        common = xmlrpc.client.ServerProxy(f'{ODOO_URL}/xmlrpc/2/common')
-        uid = common.authenticate(ODOO_DB, ODOO_USER, ODOO_PASSWORD, {})
-        if not uid:
-            return jsonify({'error': 'Authentification Odoo échouée'}), 500
-
-        models = xmlrpc.client.ServerProxy(f'{ODOO_URL}/xmlrpc/2/object')
-
-        vals = {
+        result_data = {
             'x_studio_distance_km': round(distance_km, 2),
             'x_studio_dure': round(duration_min, 1),
             'x_studio_nom_du_trajet': " -> ".join([p.get('x_studio_nom_de_point', '') for p in data]) if isinstance(data, list) else data.get('x_studio_nom_de_point', ''),
-            'x_studio_coordonnes_gps': str(coordinates),
+            'x_studio_coordonnes_gps': [[float(p['x_studio_longitude']), float(p['x_studio_latitude'])] for p in data] if isinstance(data, list) else [[float(data['x_studio_longitude']), float(data['x_studio_latitude'])]]
         }
 
-        record_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
-                                     'x_points_geographiques', 'create',
-                                     [vals])
-
-        result = {
-            'record_id': record_id,
-            'x_studio_distance_km': round(distance_km, 2),
-            'x_studio_dure': round(duration_min, 1),
-            'x_studio_nom_du_trajet': vals['x_studio_nom_du_trajet'],
-            'x_studio_coordonnes_gps': coordinates
-        }
-
-        print("✅ Résultat envoyé à Odoo et créé dans la base :", result)
-        return jsonify(result)
+        print("✅ Résultat envoyé à Odoo :", result_data)
+        return jsonify(result_data)
 
     except Exception as e:
         print("❌ Erreur serveur :", str(e))
