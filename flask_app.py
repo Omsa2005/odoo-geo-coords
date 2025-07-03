@@ -4,118 +4,119 @@ import traceback
 import random
 import xmlrpc.client
 import uuid
-import threading
 import math
+import threading
 
 app = Flask(__name__)
 
-# 🔑 Connexion Odoo
+ORS_API_KEY = '5b3ce3597851110001cf62480a32708b0250456c960d42e3850654b5'
+
 ODOO_URL = 'https://agence-vo.odoo.com'
 ODOO_DB = 'agence-vo'
 ODOO_USER = 'salhiomar147@gmail.com'
 ODOO_PASSWORD = 'Omarsalhi2005'
 
-# Connexion aux endpoints XML-RPC
 common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
 models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
 
-# Authentification
 uid = common.authenticate(ODOO_DB, ODOO_USER, ODOO_PASSWORD, {})
 if uid:
     print("✅ Connecté à Odoo avec UID :", uid)
 else:
     print("❌ Échec de connexion à Odoo")
 
-# 🌍 Trajets stockés
-trajectoires = {}
-timers = {}
+trajectoires = {}           # stocke points par trajet
+timers = {}                 # stocke timers de finalisation par trajet
+LOCK = threading.Lock()     # verrou thread-safe
 
-def optimize_trajet(trajet_key):
-    try:
-        print(f"🚀 Optimisation automatique pour {trajet_key}")
-        points = trajectoires[trajet_key]
-        if len(points) < 2:
-            print(f"⚠️ Pas assez de points pour optimiser {trajet_key}")
+def finalize_trajet(trajet_key):
+    with LOCK:
+        points = trajectoires.get(trajet_key)
+        if not points or len(points) < 2:
+            print(f"⏳ Trajet {trajet_key} trop court ou inexistant, finalisation annulée.")
             return
 
-        # Construire URL Google Maps Directions
-        google_maps_url = "https://www.google.com/maps/dir/" + "/".join(
-            f"{p['lat']},{p['lon']}" for p in points
-        )
+        print(f"🚀 Finalisation automatique du trajet {trajet_key} avec {len(points)} points...")
 
-        # Appel Directions API (mode voiture)
-        params = {
-            'origin': f"{points[0]['lat']},{points[0]['lon']}",
-            'destination': f"{points[-1]['lat']},{points[-1]['lon']}",
-            'waypoints': "|".join(f"{p['lat']},{p['lon']}" for p in points[1:-1]),
-            'key': 'AIzaSy...VOTRE_CLE_API'  # 🔑 remplace par ta clé API Google
-        }
-        response = requests.get("https://maps.googleapis.com/maps/api/directions/json", params=params)
-        print("📡 Google Directions API Response:", response.status_code)
-        directions = response.json()
+        try:
+            url = 'https://api.openrouteservice.org/v2/directions/driving-car'
+            headers = {'Authorization': ORS_API_KEY, 'Content-Type': 'application/json'}
+            body = {
+                "coordinates": [[p['lon'], p['lat']] for p in points],
+                "optimize_waypoints": True,
+                "instructions": False
+            }
+            response = requests.post(url, headers=headers, json=body)
+            response.raise_for_status()
+            result = response.json()
 
-        if directions['status'] != 'OK':
-            raise Exception(f"Google Directions API Error: {directions['status']}")
+            route = result['routes'][0]['summary']
+            distance_km = math.ceil(route['distance'] / 1000)
+            duration_sec = route['duration']
 
-        route = directions['routes'][0]['legs']
-        total_distance = sum(leg['distance']['value'] for leg in route) / 1000  # km
-        total_duration = sum(leg['duration']['value'] for leg in route) / 60    # min
+            hours = int(duration_sec // 3600)
+            minutes = int((duration_sec % 3600) // 60)
+            duree_formatee = f"{hours}h{minutes}min" if hours else f"{minutes}min"
 
-        # Formater durée (ex: 3h45min)
-        heures = int(total_duration // 60)
-        minutes = int(total_duration % 60)
-        duree_formatee = f"{heures}h{minutes}min" if heures else f"{minutes}min"
+            google_maps_link = "https://www.google.com/maps/dir/" + "/".join(
+                f"{p['lat']},{p['lon']}" for p in points
+            )
 
-        # Arrondir distance au supérieur
-        distance_arrondie = math.ceil(total_distance)
+            nom_trajet = f"Trajet Optimisé {random.randint(100, 999)}"
+            result_data = {
+                'x_name': nom_trajet,
+                'x_studio_distance_km': distance_km,
+                'x_studio_dure': duree_formatee,
+                'x_studio_nom_du_trajet': " -> ".join(p['name'] for p in points),
+                'x_studio_coordonnes_gps': google_maps_link
+            }
 
-        # Préparer données pour Odoo
-        result_data = {
-            'x_name': f"Trajet Optimisé {random.randint(1, 1000)}",
-            'x_studio_distance_km': distance_arrondie,
-            'x_studio_dure': duree_formatee,
-            'x_studio_nom_du_trajet': " -> ".join(p['name'] for p in points),
-            'x_studio_coordonnes_gps': google_maps_url
-        }
+            record_id = models.execute_kw(
+                ODOO_DB, uid, ODOO_PASSWORD,
+                'x_trajets_optimises',
+                'create',
+                [result_data]
+            )
+            print(f"✅ Trajet {trajet_key} enregistré dans Odoo avec ID : {record_id}")
 
-        print("✅ Données envoyées vers Odoo :", result_data)
-        record_id = models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            'x_trajets_optimises',
-            'create', [result_data]
-        )
-        print("✅ Enregistrement créé dans Odoo avec ID :", record_id)
+            # Nettoyage
+            del trajectoires[trajet_key]
+            if trajet_key in timers:
+                del timers[trajet_key]
 
-        # Nettoyer
-        del trajectoires[trajet_key]
-        del timers[trajet_key]
-
-    except Exception as e:
-        print("❌ Erreur pendant optimisation :", str(e))
-        traceback.print_exc()
+        except Exception as e:
+            print(f"❌ Erreur finalisation trajet {trajet_key} :", e)
+            traceback.print_exc()
 
 @app.route('/optimize_route', methods=['POST'])
-def add_point():
+def optimize_route():
     try:
         data = request.json
+        print("🔥 Données reçues :", data)
+
         trajet_key = data.get('_action') or str(uuid.uuid4())
-        lat = float(data['x_studio_latitude'])
-        lon = float(data['x_studio_longitude'])
-        name = data.get('x_studio_nom_de_point', f'Point {len(trajectoires.get(trajet_key, [])) + 1}')
 
-        if trajet_key not in trajectoires:
-            trajectoires[trajet_key] = []
+        with LOCK:
+            if trajet_key not in trajectoires:
+                trajectoires[trajet_key] = []
 
-        trajectoires[trajet_key].append({'lat': lat, 'lon': lon, 'name': name})
-        print(f"📦 Point ajouté pour {trajet_key} : {name} ({lat},{lon})")
+            lat = float(data['x_studio_latitude'])
+            lon = float(data['x_studio_longitude'])
+            name = data.get('x_studio_nom_de_point', f'Point {len(trajectoires[trajet_key]) + 1}')
 
-        # Relancer le timer (10 sec d'inactivité)
-        if trajet_key in timers:
-            timers[trajet_key].cancel()
-        timers[trajet_key] = threading.Timer(10.0, optimize_trajet, args=[trajet_key])
-        timers[trajet_key].start()
+            trajectoires[trajet_key].append({'lat': lat, 'lon': lon, 'name': name})
+            print(f"📦 Point ajouté trajet {trajet_key} : {name} ({lat},{lon})")
 
-        return jsonify({'status': 'pending', 'message': f"Point ajouté pour {trajet_key}"})
+            # Reset timer si existe
+            if trajet_key in timers:
+                timers[trajet_key].cancel()
+
+            # Créer nouveau timer 10s pour finaliser
+            timer = threading.Timer(10.0, finalize_trajet, args=[trajet_key])
+            timers[trajet_key] = timer
+            timer.start()
+
+        return jsonify({'status': 'pending', 'message': f"Point ajouté au trajet {trajet_key}. Finalisation auto dans 10s sans nouvel ajout."})
 
     except Exception as e:
         print("❌ Erreur serveur :", str(e))
