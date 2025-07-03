@@ -30,7 +30,7 @@ else:
 # 🌍 Dictionnaire pour stocker temporairement les points par trajet
 trajectoires = {}
 
-# 📍 Définir les limites géographiques de la Tunisie
+# 📍 Limites géographiques de la Tunisie
 TUNISIA_BOUNDS = {
     'min_lat': 30.228,
     'max_lat': 37.535,
@@ -42,6 +42,20 @@ def is_in_tunisia(lat, lon):
     """Vérifie si une coordonnée est en Tunisie"""
     return (TUNISIA_BOUNDS['min_lat'] <= lat <= TUNISIA_BOUNDS['max_lat'] and
             TUNISIA_BOUNDS['min_lon'] <= lon <= TUNISIA_BOUNDS['max_lon'])
+
+def call_ors(points, profile="driving-car"):
+    """Appelle l’API ORS pour un profil donné"""
+    url = f'https://api.openrouteservice.org/v2/directions/{profile}'
+    headers = {'Authorization': ORS_API_KEY, 'Content-Type': 'application/json'}
+    body = {
+        "coordinates": [[p['lon'], p['lat']] for p in points],
+        "radiuses": [2000] * len(points),  # tolérance 2 km
+        "instructions": False
+    }
+    response = requests.post(url, headers=headers, json=body)
+    print(f"📡 ORS ({profile}) Response status :", response.status_code)
+    print(f"📡 ORS ({profile}) Response body :", response.text)
+    return response
 
 @app.route('/')
 def home():
@@ -78,23 +92,19 @@ def optimize_route():
         if len(trajectoires[trajet_key]) >= 2:
             points = trajectoires[trajet_key]
 
-            # Appel OpenRouteService avec tous les points
-            url = 'https://api.openrouteservice.org/v2/directions/driving-car'
-            headers = {'Authorization': ORS_API_KEY, 'Content-Type': 'application/json'}
-            body = {
-                "coordinates": [[p['lon'], p['lat']] for p in points],
-                "radiuses": [2000] * len(points),  # rayon de 2 km pour snapping
-                "instructions": False,
-                "bounding_box": [[TUNISIA_BOUNDS['min_lon'], TUNISIA_BOUNDS['min_lat']],
-                                 [TUNISIA_BOUNDS['max_lon'], TUNISIA_BOUNDS['max_lat']]]  # limiter à la Tunisie
-            }
+            # Essayer d'abord avec "driving-car"
+            response = call_ors(points, profile="driving-car")
 
-            response = requests.post(url, headers=headers, json=body)
-            print("📡 ORS Response status :", response.status_code)
-            print("📡 ORS Response body :", response.text)
-
+            # Si échec, tenter avec "foot-walking"
             if response.status_code != 200:
-                return jsonify({'error': 'ORS API error', 'details': response.text}), 500
+                print("⚠️ Échec avec driving-car, tentative avec foot-walking...")
+                response = call_ors(points, profile="foot-walking")
+
+            # Si toujours échec, retourner une erreur
+            if response.status_code != 200:
+                error_msg = "ORS API error (car et piéton échoués)"
+                print(f"❌ {error_msg}")
+                return jsonify({'error': error_msg, 'details': response.text}), 500
 
             result = response.json()
             route = result['features'][0]['properties']['summary']
