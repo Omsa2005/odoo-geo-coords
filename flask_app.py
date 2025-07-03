@@ -3,6 +3,7 @@ import requests
 import traceback
 import random
 import xmlrpc.client
+import uuid
 
 app = Flask(__name__)
 
@@ -26,6 +27,9 @@ if uid:
 else:
     print("❌ Échec de connexion à Odoo")
 
+# 🌍 Dictionnaire pour stocker temporairement les points par trajet
+trajectoires = {}
+
 @app.route('/')
 def home():
     return "✅ API d'optimisation + Odoo opérationnelle !"
@@ -36,34 +40,29 @@ def optimize_route():
         data = request.json
         print("🔥 Données reçues de Odoo :", data)
 
-        points = []
-        noms_points = []
+        # Identifiant unique du trajet (peut être _action, ou UUID sinon)
+        trajet_key = data.get('_action') or str(uuid.uuid4())
 
-        if isinstance(data, list):
-            for point in data:
-                lat = float(point['x_studio_latitude'])
-                lon = float(point['x_studio_longitude'])
-                points.append((lat, lon))
-                noms_points.append(point.get('x_studio_nom_de_point', 'Point'))
-        elif isinstance(data, dict):
-            lat = float(data['x_studio_latitude'])
-            lon = float(data['x_studio_longitude'])
-            points.append((lat, lon))
-            noms_points.append(data.get('x_studio_nom_de_point', 'Point'))
-        else:
-            return jsonify({'error': 'Format JSON invalide'}), 400
+        # Initialiser la liste des points si trajet inconnu
+        if trajet_key not in trajectoires:
+            trajectoires[trajet_key] = []
 
-        # Si 2 points ou plus -> appel GraphHopper
-        if len(points) >= 2:
+        # Ajouter le point reçu
+        lat = float(data['x_studio_latitude'])
+        lon = float(data['x_studio_longitude'])
+        name = data.get('x_studio_nom_de_point', f'Point {len(trajectoires[trajet_key]) + 1}')
+        trajectoires[trajet_key].append({'lat': lat, 'lon': lon, 'name': name})
+        print(f"📦 Points pour le trajet [{trajet_key}] :", trajectoires[trajet_key])
+
+        # Si nombre de points >= 2, on lance l’optimisation
+        if len(trajectoires[trajet_key]) >= 2:
+            points = trajectoires[trajet_key]
+
+            # Appel GraphHopper avec tous les points
             url = 'https://graphhopper.com/api/1/route'
-            params = {
-                'vehicle': 'car',
-                'locale': 'fr',
-                'key': GRAPHOPPER_API_KEY,
-                'points_encoded': 'false'
-            }
-            for lat, lon in points:
-                params = requests.compat.urlencode({'point': f"{lat},{lon}"}, doseq=True) + '&' + params
+            params = [('point', f"{p['lat']},{p['lon']}") for p in points]
+            params += [('vehicle', 'car'), ('locale', 'fr'),
+                       ('key', GRAPHOPPER_API_KEY), ('points_encoded', 'false')]
 
             response = requests.get(url, params=params)
             print("📡 GraphHopper Response status :", response.status_code)
@@ -76,34 +75,35 @@ def optimize_route():
             route = result['paths'][0]
             distance_km = route['distance'] / 1000
             duration_min = route['time'] / 1000 / 60
-        else:
-            # Cas d'un seul point
-            distance_km = 0
-            duration_min = 0
 
-        # 🔥 Données pour Odoo
-        nom_trajet = f"Trajet {random.randint(1, 1000)}"
-        result_data = {
-            'x_name': nom_trajet,
-            'x_studio_distance_km': round(distance_km, 2),
-            'x_studio_dure': round(duration_min, 1),
-            'x_studio_nom_du_trajet': " -> ".join(noms_points),
-            'x_studio_coordonnes_gps': [[lon, lat] for lat, lon in points]
-        }
+            # 🔥 Données pour Odoo
+            nom_trajet = f"Trajet Optimisé {random.randint(1, 1000)}"
+            result_data = {
+                'x_name': nom_trajet,
+                'x_studio_distance_km': round(distance_km, 2),
+                'x_studio_dure': round(duration_min, 1),
+                'x_studio_nom_du_trajet': " -> ".join(p['name'] for p in points),
+                'x_studio_coordonnes_gps': [[p['lon'], p['lat']] for p in points]
+            }
 
-        print("✅ Données à envoyer vers Odoo :", result_data)
+            print("✅ Données à envoyer vers Odoo :", result_data)
 
-        # 📦 Création de l’enregistrement dans Odoo
-        record_id = models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            'x_trajets_optimises',  # Nom du modèle technique dans Odoo
-            'create',
-            [result_data]
-        )
-        print("✅ Enregistrement créé dans Odoo avec ID :", record_id)
+            # 📦 Créer enregistrement Odoo
+            record_id = models.execute_kw(
+                ODOO_DB, uid, ODOO_PASSWORD,
+                'x_trajets_optimises',  # Nom du modèle technique
+                'create',
+                [result_data]
+            )
+            print("✅ Enregistrement créé dans Odoo avec ID :", record_id)
 
-        # Retourne aussi le JSON à l’appelant
-        return jsonify({'status': 'success', 'odoo_record_id': record_id, **result_data})
+            # Nettoyer les points de ce trajet
+            del trajectoires[trajet_key]
+
+            return jsonify({'status': 'success', 'odoo_record_id': record_id, **result_data})
+
+        # Sinon on attend d’autres points
+        return jsonify({'status': 'pending', 'message': f"Point ajouté au trajet {trajet_key}"})
 
     except Exception as e:
         print("❌ Erreur serveur :", str(e))
