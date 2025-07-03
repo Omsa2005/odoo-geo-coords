@@ -43,13 +43,29 @@ def is_in_tunisia(lat, lon):
     return (TUNISIA_BOUNDS['min_lat'] <= lat <= TUNISIA_BOUNDS['max_lat'] and
             TUNISIA_BOUNDS['min_lon'] <= lon <= TUNISIA_BOUNDS['max_lon'])
 
+def snap_with_osrm(lat, lon):
+    """Snap une coordonnée sur la route la plus proche avec OSRM"""
+    url = f"http://router.project-osrm.org/nearest/v1/driving/{lon},{lat}"
+    try:
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if 'waypoints' in data and data['waypoints']:
+                snapped_lon, snapped_lat = data['waypoints'][0]['location']
+                print(f"🔄 Coordonnée snapée OSRM: {lat},{lon} -> {snapped_lat},{snapped_lon}")
+                return snapped_lat, snapped_lon
+    except Exception as e:
+        print(f"❌ Erreur OSRM snap: {e}")
+    # En cas d'erreur, retourne la coordonnée originale
+    return lat, lon
+
 def call_ors(points, profile="driving-car"):
     """Appelle l’API ORS pour un profil donné"""
     url = f'https://api.openrouteservice.org/v2/directions/{profile}'
     headers = {'Authorization': ORS_API_KEY, 'Content-Type': 'application/json'}
     body = {
         "coordinates": [[p['lon'], p['lat']] for p in points],
-        "radiuses": [2000] * len(points),  # tolérance 2 km
+        "radiuses": [2000] * len(points),
         "instructions": False
     }
     response = requests.post(url, headers=headers, json=body)
@@ -67,42 +83,47 @@ def optimize_route():
         data = request.json
         print("🔥 Données reçues de Odoo :", data)
 
-        # Identifiant unique du trajet
         trajet_key = data.get('_action') or str(uuid.uuid4())
 
-        # Initialiser la liste des points si trajet inconnu
         if trajet_key not in trajectoires:
             trajectoires[trajet_key] = []
 
-        # Extraire coordonnées et vérifier qu’elles sont en Tunisie
+        # Extraire coordonnée
         lat = float(data['x_studio_latitude'])
         lon = float(data['x_studio_longitude'])
         name = data.get('x_studio_nom_de_point', f'Point {len(trajectoires[trajet_key]) + 1}')
-        print(f"🛰️ Vérification point : {name} -> Lat: {lat}, Lon: {lon}")
+        print(f"🛰️ Point reçu : {name} -> Lat: {lat}, Lon: {lon}")
 
+        # Vérifier Tunisie
         if not is_in_tunisia(lat, lon):
             error_msg = f"❌ Le point '{name}' est hors des limites de la Tunisie"
             print(error_msg)
             return jsonify({'error': error_msg}), 400
 
-        trajectoires[trajet_key].append({'lat': lat, 'lon': lon, 'name': name})
+        # Snap avec OSRM
+        snapped_lat, snapped_lon = snap_with_osrm(lat, lon)
+
+        trajectoires[trajet_key].append({'lat': snapped_lat, 'lon': snapped_lon, 'name': name})
         print(f"📦 Points pour le trajet [{trajet_key}] :", trajectoires[trajet_key])
 
-        # Si nombre de points >= 2, on lance l’optimisation
         if len(trajectoires[trajet_key]) >= 2:
             points = trajectoires[trajet_key]
 
-            # Essayer d'abord avec "driving-car"
+            # Essayer driving-car
             response = call_ors(points, profile="driving-car")
 
-            # Si échec, tenter avec "foot-walking"
+            # Fallback foot-walking
             if response.status_code != 200:
-                print("⚠️ Échec avec driving-car, tentative avec foot-walking...")
+                print("⚠️ Échec driving-car, tentative foot-walking...")
                 response = call_ors(points, profile="foot-walking")
 
-            # Si toujours échec, retourner une erreur
+            # Fallback cycling-regular
             if response.status_code != 200:
-                error_msg = "ORS API error (car et piéton échoués)"
+                print("⚠️ Échec foot-walking, tentative cycling-regular...")
+                response = call_ors(points, profile="cycling-regular")
+
+            if response.status_code != 200:
+                error_msg = "ORS API error (car, foot, vélo échoués)"
                 print(f"❌ {error_msg}")
                 return jsonify({'error': error_msg, 'details': response.text}), 500
 
@@ -111,7 +132,6 @@ def optimize_route():
             distance_km = route['distance'] / 1000
             duration_min = route['duration'] / 60
 
-            # 🔥 Données pour Odoo
             nom_trajet = f"Trajet Optimisé {random.randint(1, 1000)}"
             result_data = {
                 'x_name': nom_trajet,
@@ -123,21 +143,18 @@ def optimize_route():
 
             print("✅ Données à envoyer vers Odoo :", result_data)
 
-            # 📦 Créer enregistrement Odoo
             record_id = models.execute_kw(
                 ODOO_DB, uid, ODOO_PASSWORD,
-                'x_trajets_optimises',  # Nom du modèle technique
+                'x_trajets_optimises',
                 'create',
                 [result_data]
             )
             print("✅ Enregistrement créé dans Odoo avec ID :", record_id)
 
-            # Nettoyer les points de ce trajet
             del trajectoires[trajet_key]
 
             return jsonify({'status': 'success', 'odoo_record_id': record_id, **result_data})
 
-        # Sinon on attend d’autres points
         return jsonify({'status': 'pending', 'message': f"Point ajouté au trajet {trajet_key}"})
 
     except Exception as e:
