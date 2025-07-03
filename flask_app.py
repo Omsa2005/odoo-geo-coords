@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import requests
 import traceback
+import random
 
 app = Flask(__name__)
 GRAPHOPPER_API_KEY = 'a917c6a2-7403-4784-85bb-bd87deaaabdb'
@@ -15,34 +16,30 @@ def optimize_route():
         data = request.json
         print("🔥 Données reçues de Odoo :", data)
 
-        coordinates = []
+        points = []
+        noms_points = []
 
         if isinstance(data, list):
+            if len(data) < 2:
+                return jsonify({'error': 'Minimum 2 points requis pour optimiser le trajet'}), 400
             for point in data:
                 lat = float(point['x_studio_latitude'])
                 lon = float(point['x_studio_longitude'])
-                coordinates.append(f"{lat},{lon}")
-        elif isinstance(data, dict):
-            lat = float(data['x_studio_latitude'])
-            lon = float(data['x_studio_longitude'])
-            coordinates.append(f"{lat},{lon}")
-            coordinates.append(f"{lat},{lon}")  # doublon pour forcer le calcul
+                points.append((lat, lon))
+                noms_points.append(point.get('x_studio_nom_de_point', 'Point'))
         else:
             return jsonify({'error': 'Format JSON invalide'}), 400
 
-        if len(coordinates) < 2:
-            return jsonify({'error': 'Minimum 2 points requis'}), 400
-
-        # Construire URL de la requête GraphHopper
-        url = f"https://graphhopper.com/api/1/route"
+        url = 'https://graphhopper.com/api/1/route'
         params = {
-            'point': coordinates,
             'vehicle': 'car',
             'locale': 'fr',
-            'calc_points': 'true',
             'key': GRAPHOPPER_API_KEY,
             'points_encoded': 'false'
         }
+        # Ajoute chaque point comme paramètre 'point'
+        for lat, lon in points:
+            params = requests.compat.urlencode({'point': f"{lat},{lon}"}, doseq=True) + '&' + params
 
         response = requests.get(url, params=params)
         print("📡 GraphHopper Response status :", response.status_code)
@@ -56,11 +53,15 @@ def optimize_route():
         distance_km = route['distance'] / 1000
         duration_min = route['time'] / 1000 / 60
 
+        # 🔥 Génère un nom pour x_name
+        nom_trajet = f"Trajet {random.randint(1, 1000)}"
+
         result_data = {
+            'x_name': nom_trajet,
             'x_studio_distance_km': round(distance_km, 2),
             'x_studio_dure': round(duration_min, 1),
-            'x_studio_nom_du_trajet': " -> ".join([p.get('x_studio_nom_de_point', '') for p in data]) if isinstance(data, list) else data.get('x_studio_nom_de_point', ''),
-            'x_studio_coordonnes_gps': [[float(p['x_studio_longitude']), float(p['x_studio_latitude'])] for p in data] if isinstance(data, list) else [[float(data['x_studio_longitude']), float(data['x_studio_latitude'])]]
+            'x_studio_nom_du_trajet': " -> ".join(noms_points),
+            'x_studio_coordonnes_gps': [[lon, lat] for lat, lon in points]
         }
 
         print("✅ Résultat envoyé à Odoo :", result_data)
