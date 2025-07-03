@@ -128,32 +128,39 @@ def optimize_route():
                 return jsonify({'error': error_msg, 'details': response.text}), 500
 
             result = response.json()
-            route = result['features'][0]['properties']['summary']
-            distance_km = route['distance'] / 1000
-            duration_min = route['duration'] / 60
 
-            nom_trajet = f"Trajet Optimisé {random.randint(1, 1000)}"
-            result_data = {
-                'x_name': nom_trajet,
-                'x_studio_distance_km': round(distance_km, 2),
-                'x_studio_dure': round(duration_min, 1),
-                'x_studio_nom_du_trajet': " -> ".join(p['name'] for p in points),
-                'x_studio_coordonnes_gps': [[p['lon'], p['lat']] for p in points]
-            }
+            if 'routes' in result and len(result['routes']) > 0:
+                route = result['routes'][0]['summary']
+                distance_km = route['distance'] / 1000
+                duration_min = route['duration'] / 60
 
-            print("✅ Données à envoyer vers Odoo :", result_data)
+                nom_trajet = f"Trajet Optimisé {random.randint(1, 1000)}"
+                result_data = {
+                    'x_name': nom_trajet,
+                    'x_studio_distance_km': round(distance_km, 2),
+                    'x_studio_dure': round(duration_min, 1),
+                    'x_studio_nom_du_trajet': " -> ".join(p['name'] for p in points),
+                    'x_studio_coordonnes_gps': [[p['lon'], p['lat']] for p in points]
+                }
 
-            record_id = models.execute_kw(
-                ODOO_DB, uid, ODOO_PASSWORD,
-                'x_trajets_optimises',
-                'create',
-                [result_data]
-            )
-            print("✅ Enregistrement créé dans Odoo avec ID :", record_id)
+                print("✅ Données à envoyer vers Odoo :", result_data)
 
-            del trajectoires[trajet_key]
+                record_id = models.execute_kw(
+                    ODOO_DB, uid, ODOO_PASSWORD,
+                    'x_trajets_optimises',
+                    'create',
+                    [result_data]
+                )
+                print("✅ Enregistrement créé dans Odoo avec ID :", record_id)
 
-            return jsonify({'status': 'success', 'odoo_record_id': record_id, **result_data})
+                del trajectoires[trajet_key]
+
+                return jsonify({'status': 'success', 'odoo_record_id': record_id, **result_data})
+
+            else:
+                error_msg = "Format de réponse ORS inattendu"
+                print(f"❌ {error_msg}")
+                return jsonify({'error': error_msg, 'details': result}), 500
 
         return jsonify({'status': 'pending', 'message': f"Point ajouté au trajet {trajet_key}"})
 
