@@ -7,8 +7,8 @@ import uuid
 
 app = Flask(__name__)
 
-# 🔑 API GraphHopper
-GRAPHOPPER_API_KEY = 'a917c6a2-7403-4784-85bb-bd87deaaabdb'
+# 🔑 API OpenRouteService
+ORS_API_KEY = '5b3ce3597851110001cf62480a32708b0250456c960d42e3850654b5'
 
 # 🔑 Connexion Odoo
 ODOO_URL = 'https://agence-vo.odoo.com'
@@ -58,23 +58,25 @@ def optimize_route():
         if len(trajectoires[trajet_key]) >= 2:
             points = trajectoires[trajet_key]
 
-            # Appel GraphHopper avec tous les points
-            url = 'https://graphhopper.com/api/1/route'
-            params = [('point', f"{p['lat']},{p['lon']}") for p in points]
-            params += [('vehicle', 'car'), ('locale', 'fr'),
-                       ('key', GRAPHOPPER_API_KEY), ('points_encoded', 'false')]
+            # Appel OpenRouteService avec tous les points
+            url = 'https://api.openrouteservice.org/v2/directions/driving-car'
+            headers = {'Authorization': ORS_API_KEY, 'Content-Type': 'application/json'}
+            body = {
+                "coordinates": [[p['lon'], p['lat']] for p in points],
+                "instructions": False
+            }
 
-            response = requests.get(url, params=params)
-            print("📡 GraphHopper Response status :", response.status_code)
-            print("📡 GraphHopper Response body :", response.text)
+            response = requests.post(url, headers=headers, json=body)
+            print("📡 ORS Response status :", response.status_code)
+            print("📡 ORS Response body :", response.text)
 
             if response.status_code != 200:
-                return jsonify({'error': 'GraphHopper API error', 'details': response.text}), 500
+                return jsonify({'error': 'ORS API error', 'details': response.text}), 500
 
             result = response.json()
-            route = result['paths'][0]
+            route = result['features'][0]['properties']['summary']
             distance_km = route['distance'] / 1000
-            duration_min = route['time'] / 1000 / 60
+            duration_min = route['duration'] / 60
 
             # 🔥 Données pour Odoo
             nom_trajet = f"Trajet Optimisé {random.randint(1, 1000)}"
