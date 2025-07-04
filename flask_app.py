@@ -46,13 +46,14 @@ def haversine(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c  # distance en km
 
-# 🧠 Algo Nearest Neighbor pour ordre optimisé
+# 🧠 Algo Nearest Neighbor avec départ/retour fixe
 def optimize_order(points):
     if not points:
         return []
 
-    unvisited = points.copy()
-    path = [unvisited.pop(0)]  # commencer au premier point
+    start_point = points[0]         # Point de départ fixe
+    unvisited = points[1:]          # Points restants
+    path = [start_point]
 
     while unvisited:
         last = path[-1]
@@ -60,6 +61,7 @@ def optimize_order(points):
         path.append(next_point)
         unvisited.remove(next_point)
 
+    path.append(start_point)        # Retour au départ
     return path
 
 # 🚀 Finalise et envoie à Odoo
@@ -96,7 +98,7 @@ def finalize_trajet(trajet_key):
             minutes = int((duree_h - hours) * 60)
             duree_formatee = f"{hours}h{minutes}min" if hours else f"{minutes}min"
 
-            # 🌍 Lien Google Maps
+            # 🌍 Lien Google Maps (complet avec retour)
             google_maps_link = "https://www.google.com/maps/dir/" + "/".join(
                 f"{p['lat']},{p['lon']}" for p in optimized_points
             )
@@ -107,7 +109,7 @@ def finalize_trajet(trajet_key):
                 'x_name': nom_trajet,
                 'x_studio_distance_km': distance_km,
                 'x_studio_dure': duree_formatee,
-                'x_studio_nom_du_trajet': " -> ".join(p['name'] for p in optimized_points),
+                'x_studio_nom_du_trajet': " -> ".join(p['name'] for p in optimized_points),  # ✅ affiche retour
                 'x_studio_coordonnes_gps': google_maps_link
             }
             logging.info(f"✅ Données envoyées à Odoo : {result_data}")
@@ -157,7 +159,6 @@ def optimize_route():
         logging.error("❌ Erreur serveur :", exc_info=True)
         return jsonify({'error': 'Erreur serveur Flask', 'details': str(e)}), 500
 
-# NE PAS METTRE app.run() ici si tu utilises gunicorn !
-
+# NE PAS METTRE app.run() ici si tu utilises gunicorn
 # if __name__ == '__main__':
 #     app.run(debug=True, host='0.0.0.0')
