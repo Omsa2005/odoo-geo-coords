@@ -5,19 +5,19 @@ import math
 import threading
 import random
 import logging
-import traceback
 
 app = Flask(__name__)
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-
-# 🔑 Connexion Odoo
+# 📋 Configuration Odoo
 ODOO_URL = 'https://agence-vo.odoo.com'
 ODOO_DB = 'agence-vo'
 ODOO_USER = 'salhiomar147@gmail.com'
 ODOO_PASSWORD = 'Omarsalhi2005'
 
+# 📢 Logger
+logging.basicConfig(level=logging.INFO)
+
+# 🔗 Connexion Odoo
 try:
     common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
     models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
@@ -27,138 +27,133 @@ try:
     else:
         raise Exception("❌ Échec de connexion à Odoo")
 except Exception as e:
-    logging.error("Erreur connexion Odoo", exc_info=True)
+    logging.error("❌ Erreur de connexion à Odoo", exc_info=True)
     raise e
 
-# 📦 Trajets et timers
+# 🧠 Données temporaires
 trajectoires = {}
 timers = {}
 LOCK = threading.Lock()
 
-# 🌍 Fonction Haversine pour distance entre 2 points
+# 🌍 Distance Haversine
 def haversine(lat1, lon1, lat2, lon2):
-    R = 6371  # rayon Terre en km
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    delta_phi = math.radians(lat2 - lat1)
-    delta_lambda = math.radians(lon2 - lon1)
-    a = math.sin(delta_phi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2)**2
+    R = 6371
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c  # distance en km
+    return R * c
 
-# 🧠 Algo Nearest Neighbor avec départ/retour fixe
+# 🧠 Optimisation en gardant le premier point fixe
 def optimize_order(points):
-    if not points:
-        return []
+    if len(points) < 2:
+        return points
 
-    start_point = points[0]         # Point de départ fixe
-    unvisited = points[1:]          # Points restants
+    start_point = points[0]
+    to_optimize = points[1:]
     path = [start_point]
 
-    while unvisited:
-        last = path[-1]
-        next_point = min(unvisited, key=lambda p: haversine(last['lat'], last['lon'], p['lat'], p['lon']))
+    current = start_point
+    while to_optimize:
+        next_point = min(to_optimize, key=lambda p: haversine(current['lat'], current['lon'], p['lat'], p['lon']))
         path.append(next_point)
-        unvisited.remove(next_point)
+        to_optimize.remove(next_point)
+        current = next_point
 
-    path.append(start_point)        # Retour au départ
+    path.append(start_point)
     return path
 
-# 🚀 Finalise et envoie à Odoo
+# 🚀 Finalisation d’un trajet
 def finalize_trajet(trajet_key):
     with LOCK:
         points = trajectoires.get(trajet_key)
         if not points or len(points) < 2:
-            logging.info(f"⏳ Trajet {trajet_key} annulé (pas assez de points)")
+            logging.info(f"⚠️ Pas assez de points pour le trajet {trajet_key}")
             trajectoires.pop(trajet_key, None)
             if trajet_key in timers:
                 timers.pop(trajet_key).cancel()
             return
 
-        logging.info(f"🚀 Optimisation du trajet {trajet_key} ({len(points)} points)")
-
         try:
-            # 📌 Optimiser ordre
-            optimized_points = optimize_order(points)
-            logging.info(f"🔄 Ordre optimisé : {[p['name'] for p in optimized_points]}")
+            logging.info(f"🔄 Optimisation du trajet {trajet_key}")
+            optimized = optimize_order(points)
 
-            # 📏 Distance totale
-            total_distance = 0
-            for i in range(len(optimized_points) - 1):
-                p1 = optimized_points[i]
-                p2 = optimized_points[i + 1]
-                total_distance += haversine(p1['lat'], p1['lon'], p2['lat'], p2['lon'])
-
-            distance_km = math.ceil(total_distance)  # arrondi au supérieur
-
-            # ⏱️ Durée estimée (60 km/h)
-            vitesse_moyenne = 60  # km/h
-            duree_h = total_distance / vitesse_moyenne
-            hours = int(duree_h)
-            minutes = int((duree_h - hours) * 60)
-            duree_formatee = f"{hours}h{minutes}min" if hours else f"{minutes}min"
-
-            # 🌍 Lien Google Maps (complet avec retour)
-            google_maps_link = "https://www.google.com/maps/dir/" + "/".join(
-                f"{p['lat']},{p['lon']}" for p in optimized_points
+            total_km = sum(
+                haversine(optimized[i]['lat'], optimized[i]['lon'],
+                          optimized[i + 1]['lat'], optimized[i + 1]['lon'])
+                for i in range(len(optimized) - 1)
             )
 
-            # 📝 Données à envoyer
+            km_arrondi = math.ceil(total_km)
+            duree_h = total_km / 60
+            heures = int(duree_h)
+            minutes = int((duree_h - heures) * 60)
+            duree_str = f"{heures}h{minutes}min" if heures else f"{minutes}min"
+
+            google_maps_link = "https://www.google.com/maps/dir/" + "/".join(
+                f"{p['lat']},{p['lon']}" for p in optimized
+            )
+
             nom_trajet = f"Trajet Optimisé {random.randint(100, 999)}"
-            result_data = {
+            donnees = {
                 'x_name': nom_trajet,
-                'x_studio_distance_km': distance_km,
-                'x_studio_dure': duree_formatee,
-                'x_studio_nom_du_trajet': " -> ".join(p['name'] for p in optimized_points),  # ✅ affiche retour
+                'x_studio_distance_km': km_arrondi,
+                'x_studio_dure': duree_str,
+                'x_studio_nom_du_trajet': " -> ".join(p['name'] for p in optimized),
                 'x_studio_coordonnes_gps': google_maps_link
             }
-            logging.info(f"✅ Données envoyées à Odoo : {result_data}")
 
-            # ✅ Enregistrement Odoo
             record_id = models.execute_kw(
                 ODOO_DB, uid, ODOO_PASSWORD,
-                'x_trajets_optimises', 'create', [result_data]
+                'x_trajets_optimises', 'create', [donnees]
             )
             logging.info(f"✅ Trajet {trajet_key} enregistré dans Odoo (ID {record_id})")
 
         except Exception as e:
-            logging.error(f"❌ Erreur finalisation trajet {trajet_key} :", exc_info=True)
+            logging.error(f"❌ Erreur pendant la finalisation du trajet {trajet_key}", exc_info=True)
         finally:
             trajectoires.pop(trajet_key, None)
             if trajet_key in timers:
                 timers.pop(trajet_key).cancel()
 
+# 🧩 API de réception des points
 @app.route('/optimize_route', methods=['POST'])
 def optimize_route():
     try:
         data = request.json
-        logging.info(f"🔥 Données reçues : {data}")
+        logging.info(f"📥 Reçu : {data}")
 
         trajet_key = data.get('_action') or str(uuid.uuid4())
+
         with LOCK:
             if trajet_key not in trajectoires:
                 trajectoires[trajet_key] = []
 
-            lat = float(data['x_studio_latitude'])
-            lon = float(data['x_studio_longitude'])
-            name = data.get('x_studio_nom_de_point', f'Point {len(trajectoires[trajet_key]) + 1}')
+            point = {
+                'lat': float(data['x_studio_latitude']),
+                'lon': float(data['x_studio_longitude']),
+                'name': data.get('x_studio_nom_de_point', f"Point {len(trajectoires[trajet_key]) + 1}")
+            }
 
-            trajectoires[trajet_key].append({'lat': lat, 'lon': lon, 'name': name})
-            logging.info(f"📦 Point ajouté trajet {trajet_key} : {name} ({lat},{lon})")
+            trajectoires[trajet_key].append(point)
+            logging.info(f"➕ Point ajouté au trajet {trajet_key} : {point}")
 
-            # ⏲️ Reset Timer (2 secondes)
+            # (Re)Démarrer le timer
             if trajet_key in timers:
                 timers[trajet_key].cancel()
             timer = threading.Timer(2.0, finalize_trajet, args=[trajet_key])
             timers[trajet_key] = timer
             timer.start()
 
-        return jsonify({'status': 'pending', 'message': f"Point ajouté au trajet {trajet_key}. Finalisation auto dans 2s sans nouvel ajout."})
+        return jsonify({
+            'status': 'pending',
+            'trajet_key': trajet_key,
+            'message': f"Point enregistré. Le trajet sera optimisé dans 2 secondes si aucun autre point n’est ajouté."
+        })
 
     except Exception as e:
-        logging.error("❌ Erreur serveur :", exc_info=True)
-        return jsonify({'error': 'Erreur serveur Flask', 'details': str(e)}), 500
+        logging.error("❌ Erreur dans /optimize_route", exc_info=True)
+        return jsonify({'error': str(e)}), 500
 
-# NE PAS METTRE app.run() ici si tu utilises gunicorn
-# if __name__ == '__main__':
-#     app.run(debug=True, host='0.0.0.0')
+# ❗ Ne pas inclure app.run() ici si vous déployez avec gunicorn
